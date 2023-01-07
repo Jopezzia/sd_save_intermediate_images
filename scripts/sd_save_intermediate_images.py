@@ -278,7 +278,7 @@ class Script(scripts.Script):
             setattr(KDiffusionSampler, "callback_state", callback_state)
 
     def postprocess(self, p, processed, is_active, intermediate_type, every_n, stop_at_n, save_timelaps, timelaps_frame_duration, resize_timelaps, upscale_factor, save_intermediate_images):
-        if save_timelaps:
+        if is_active and save_timelaps:
             if not os.path.exists(p.intermed_outpath):
                 os.makedirs(p.intermed_outpath)
             if resize_timelaps:
