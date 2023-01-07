@@ -5,6 +5,7 @@ from modules.processing import Processed, process_images, fix_seed, create_infot
 from modules.sd_samplers import KDiffusionSampler, sample_to_image
 from modules.images import save_image, FilenameGenerator, get_next_sequence_number
 from modules.shared import opts, state
+from PIL import Image, ImageDraw
 
 import gradio as gr
 
@@ -19,29 +20,98 @@ class Script(scripts.Script):
 
     def ui(self, is_img2img):
         with gr.Group():
-            with gr.Accordion("Save intermediate images", open=False):
-                with gr.Group():
+            with gr.Group():
+                with gr.Row():
                     is_active = gr.Checkbox(
                         label="Save intermediate images",
                         value=False
                     )
-                with gr.Group():
-                    intermediate_type = gr.Radio(
-                        label="Should the intermediate images be denoised or noisy?",
-                        choices=["Denoised", "Noisy"],
-                        value="Denoised"
+                    save_timelaps = gr.Checkbox(
+                        label="Save timelaps",
+                        value=False,
+                        visible=False
                     )
-                with gr.Group():
-                    every_n = gr.Number(
-                        label="Save every N images",
-                        value="5"
+            with gr.Group():
+                with gr.Row():
+                    timelaps_frame_duration = gr.Slider(
+                        label='GIF frame duration', 
+                        minimum=10, 
+                        maximum=1000, 
+                        step=10, 
+                        value=100, 
+                        interactive=True,
+                        visible=False
                     )
-                with gr.Group():
-                    stop_at_n = gr.Number(
-                        label="Stop at N images (must be 0 = don't stop early or a multiple of 'Save every N images')",
-                        value="0"
+                with gr.Row():
+                    resize_timelaps = gr.Checkbox(
+                        label="Resize timelaps images",
+                        value=True,
+                        visible=False
                     )
-        return [is_active, intermediate_type, every_n, stop_at_n]
+                    upscale_factor = gr.Slider(
+                        label='Resize factor', 
+                        minimum=1, 
+                        maximum=10, 
+                        step=1, 
+                        value=4, 
+                        interactive=True,
+                        visible=False
+                    )
+                with gr.Row():
+                    save_intermediate_images = gr.Checkbox(
+                        label="Save intermediate images",
+                        value=True,
+                        visible=False
+                    )
+            with gr.Group():
+                intermediate_type = gr.Radio(
+                    label="Should the intermediate images be denoised or noisy?",
+                    choices=["Denoised", "Noisy"],
+                    value="Denoised",
+                    visible=False
+                )
+            with gr.Group():
+                every_n = gr.Number(
+                    label="Save every N images",
+                    value="5",
+                    visible=False
+                )
+            with gr.Group():
+                stop_at_n = gr.Number(
+                    label="Stop at N images (must be 0 = don't stop early or a multiple of 'Save every N images')",
+                    value="0",
+                    visible=False
+                )
+
+        def is_active_on_change(is_active, save_timelaps):
+            return [gr.update(visible=is_active),
+                gr.update(visible=is_active),
+                gr.update(visible=is_active),
+                gr.update(visible=is_active),
+                gr.update(visible=is_active and save_timelaps),
+                gr.update(visible=is_active and save_timelaps),
+                gr.update(visible=is_active and save_timelaps),
+                gr.update(visible=is_active and save_timelaps)]
+                
+        is_active.change(
+            fn=is_active_on_change,
+            inputs=[is_active, save_timelaps],
+            outputs=[intermediate_type, every_n, stop_at_n, save_timelaps, timelaps_frame_duration, resize_timelaps, upscale_factor, save_intermediate_images]
+        )
+
+        def save_timelaps_on_change(save_timelaps):
+            return [gr.update(visible=save_timelaps),
+                    gr.update(visible=save_timelaps),
+                    gr.update(visible=save_timelaps),
+                    gr.update(visible=save_timelaps)]
+
+        save_timelaps.change(
+            fn=save_timelaps_on_change,
+            inputs=save_timelaps,
+            outputs=[timelaps_frame_duration, resize_timelaps, upscale_factor, save_intermediate_images]
+        )
+
+        return [is_active, intermediate_type, every_n, stop_at_n, save_timelaps, timelaps_frame_duration, resize_timelaps, upscale_factor, save_intermediate_images]
 
     def save_image_only_get_name(image, path, basename, seed=None, prompt=None, extension='png', info=None, short_filename=False, no_prompt=False, grid=False, pnginfo_section_name='parameters', p=None, existing_info=None, forced_filename=None, suffix="", save_to_dirs=None):
         #for description see modules.images.save_image, same code up saving of files
@@ -87,7 +157,7 @@ class Script(scripts.Script):
 
         return (fullfn)
 
-    def process(self, p, is_active, intermediate_type, every_n, stop_at_n):
+    def process(self, p, is_active, intermediate_type, every_n, stop_at_n, save_timelaps, timelaps_frame_duration, resize_timelaps, upscale_factor, save_intermediate_images):
         if is_active:
             def callback_state(self, d):
                 """
@@ -157,6 +227,8 @@ class Script(scripts.Script):
                                 p.intermed_outpath_number = []
                                 p.intermed_outpath_number.append(intermed_number)
                                 p.intermed_outpath_suffix = intermed_suffix
+                                p.intermed_timelaps = []
+                                p.intermed_save_timelaps = save_timelaps
                             else:
                                 intermed_number = int(p.intermed_outpath_number[0]) + index
                                 intermed_number = f"{intermed_number:0{digits}}"
@@ -181,20 +253,39 @@ class Script(scripts.Script):
                                 if (p.enable_hr and p.intermed_final_pass) or not p.enable_hr:
                                     #early stop for this seed reached, prevent normal save, save as final image
                                     p.do_not_save_samples = True
-                                    save_image(image, p.outpath_samples, "", p.all_seeds[index], p.prompt, opts.samples_format, info=infotext, p=p)
+                                    if save_timelaps:
+                                        p.intermed_timelaps.append(image)
+                                    if save_intermediate_images:
+                                        save_image(image, p.outpath_samples, "", p.all_seeds[index], p.prompt, opts.samples_format, info=infotext, p=p)
                                     if index == p.batch_size - 1:
                                         #early stop for final seed and final pass reached, interrupt further processing
                                         state.interrupt()
                                 else:
                                     #save intermediate image
-                                    save_image(image, p.intermed_outpath, "", info=infotext, p=p, forced_filename=filename)
+                                    if save_timelaps:
+                                        p.intermed_timelaps.append(image)
+                                    if save_intermediate_images:
+                                        save_image(image, p.intermed_outpath, "", info=infotext, p=p, forced_filename=filename)
                             else:
                                 #save intermediate image
-                                save_image(image, p.intermed_outpath, "", info=infotext, p=p, forced_filename=filename)
+                                if save_timelaps:
+                                    p.intermed_timelaps.append(image)
+                                if save_intermediate_images:
+                                    save_image(image, p.intermed_outpath, "", info=infotext, p=p, forced_filename=filename)
 
                 return orig_callback_state(self, d)
 
             setattr(KDiffusionSampler, "callback_state", callback_state)
 
-    def postprocess(self, p, processed, is_active, intermediate_type, every_n, stop_at_n):
+    def postprocess(self, p, processed, is_active, intermediate_type, every_n, stop_at_n, save_timelaps, timelaps_frame_duration, resize_timelaps, upscale_factor, save_intermediate_images):
+        if save_timelaps:
+            if not os.path.exists(p.intermed_outpath):
+                os.makedirs(p.intermed_outpath)
+            if resize_timelaps:
+                for i in range(len(p.intermed_timelaps)):
+                    p.intermed_timelaps[i] = p.intermed_timelaps[i].resize((p.intermed_timelaps[i].width * upscale_factor, p.intermed_timelaps[i].height * upscale_factor), resample=Image.LANCZOS)
+            frame_one = p.intermed_timelaps[0]
+            fullfn = os.path.join(p.intermed_outpath, "timelaps.gif")
+            frame_one.save(fullfn, format="GIF", append_images=p.intermed_timelaps, save_all=True, duration=timelaps_frame_duration, loop=0)
+
         setattr(KDiffusionSampler, "callback_state", orig_callback_state)
